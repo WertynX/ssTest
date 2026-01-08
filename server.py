@@ -2,14 +2,18 @@ from flask import Flask, request, Response
 import requests
 import hashlib
 import time
+import os
 
 app = Flask(__name__)
 
 # Секретный ключ для подписи (должен совпадать с клиентом)
 SECRET_KEY = "YOUR_SECRET_KEY_HERE_CHANGE_THIS"
 
-# Версия сервера
-SERVER_VERSION = "v1.1.0"  # Измените при обновлении скрипта
+# Версия сервера (берется из первой строки script.lua)
+SERVER_VERSION = "v1.1.0"  # Можно обновлять вручную или парсить из файла
+
+# Путь к файлу со скриптом
+SCRIPT_FILE = "script.lua"
 
 # Словарь ключей: None = разрешено, иначе = причина запрета
 VALID_KEYS = {
@@ -29,19 +33,47 @@ VALID_KEYS = {
 TELEGRAM_BOT_TOKEN = "7367795974:AAGOLmN8ztMzTNjPpj-yPEasu524EdQGWfw"
 TELEGRAM_USER_ID = "5212844017"
 
-# Содержимое script.lua для обновления
 def get_script_content():
-    """Возвращает содержимое скрипта для обновления"""
-    return '''-- Новый скрипт Pilot (upg.) v1.1.0
+    """Читает содержимое скрипта из файла"""
+    try:
+        with open(SCRIPT_FILE, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        # Пытаемся извлечь версию из первой строки файла
+        lines = content.split('\n')
+        for line in lines[:5]:  # Проверяем первые 5 строк
+            if 'v' in line and any(char.isdigit() for char in line):
+                # Ищем версию в формате vX.X.X
+                import re
+                version_match = re.search(r'v\d+\.\d+\.\d+', line)
+                if version_match:
+                    global SERVER_VERSION
+                    SERVER_VERSION = version_match.group()
+                    print(f"Обнаружена версия в файле: {SERVER_VERSION}")
+                    break
+        
+        return content
+    except FileNotFoundError:
+        print(f"Файл {SCRIPT_FILE} не найден! Создан шаблонный скрипт.")
+        # Создаем шаблонный файл, если его нет
+        template = '''-- Обновленный скрипт Pilot (upg.) v1.1.0
 print("Это обновленная версия скрипта!")
 
--- Здесь будет ваш основной код
+-- Основной код
 function main()
-    print("Скрипт успешно обновлен до версии " .. SERVER_VERSION)
-    -- Добавьте ваш код здесь
+    print("Скрипт успешно обновлен!")
+    return true
 end
 
 main()'''
+        
+        with open(SCRIPT_FILE, 'w', encoding='utf-8') as f:
+            f.write(template)
+        
+        return template
+    except Exception as e:
+        print(f"Ошибка при чтении файла {SCRIPT_FILE}: {e}")
+        return f"-- Ошибка загрузки скрипта: {str(e)}"
 
 def get_client_ip(request):
     """Получаем все возможные IP-адреса клиента"""
@@ -130,7 +162,7 @@ def check_key():
             reason = VALID_KEYS[key]
             if reason is None:
                 if version_mismatch:
-                    # Отправляем обновление скрипта
+                    # Отправляем обновление скрипта из файла
                     response_text = get_script_content()
                     code = 210  # Специальный код для обновления
                 else:
@@ -145,11 +177,17 @@ def check_key():
             code = 403
         
         # Формируем сообщение для Telegram
-        message = f"🔐 Проверка ключа (RakBot):\nIP: {ips_text}\nKEY: {key}\nHWID: {hwid}\nВерсия клиента: {client_version}\nОтвет: {code}"
-        if version_mismatch and code == 210:
-            message += f"\n⚠️ Отправлено обновление с {client_version} до {SERVER_VERSION}"
+        message = f"🔐 Проверка ключа (RakBot):\nIP: {ips_text}\nKEY: {key}\nHWID: {hwid}\nВерсия клиента: {client_version}\nВерсия сервера: {SERVER_VERSION}\nОтвет: {code}"
+        
+        if version_mismatch:
+            if code == 210:
+                message += f"\n✅ Отправлено обновление: {client_version} → {SERVER_VERSION}"
+            else:
+                message += f"\n⚠️ Версии не совпадают: клиент {client_version}, сервер {SERVER_VERSION}"
+        
         if reason and code == 403:
             message += f"\nПричина: {reason}"
+        
         send_telegram_message(message)
         
         # Создаем подпись для ответа
@@ -172,5 +210,42 @@ def check_key():
         send_telegram_message(f"⚠️ Ошибка при обработке запроса:\nIP: {ips_text}\nError: {str(e)}")
         return f"HTTP/1.1 400 BAD REQUEST\n\nError: {str(e)}", 400
 
+@app.route('/update_script', methods=['POST'])
+def update_script_file():
+    """Эндпоинт для обновления файла script.lua (для админа)"""
+    try:
+        admin_key = request.headers.get('X-Admin-Key')
+        if admin_key != "YOUR_ADMIN_SECRET_KEY":  # Замените на свой секретный ключ
+            return "Unauthorized", 401
+        
+        new_script = request.data.decode('utf-8')
+        
+        # Сохраняем новый скрипт
+        with open(SCRIPT_FILE, 'w', encoding='utf-8') as f:
+            f.write(new_script)
+        
+        # Обновляем версию сервера из файла
+        global SERVER_VERSION
+        SERVER_VERSION = "v1.1.0"  # Сбросим, функция get_script_content обновит при следующем запросе
+        
+        return f"Script updated successfully. Server version reset to {SERVER_VERSION}", 200
+    except Exception as e:
+        return f"Error: {str(e)}", 500
+
+@app.route('/version', methods=['GET'])
+def get_version():
+    """Эндпоинт для проверки версии сервера"""
+    return {
+        "server_version": SERVER_VERSION,
+        "script_file": SCRIPT_FILE,
+        "script_exists": os.path.exists(SCRIPT_FILE)
+    }
+
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8080)
+    # Загружаем скрипт при старте для извлечения версии
+    print("Загрузка скрипта из файла...")
+    get_script_content()
+    print(f"Сервер запущен с версией: {SERVER_VERSION}")
+    print(f"Файл скрипта: {SCRIPT_FILE}")
+    
+    app.run(host='0.0.0.0', port=8080, debug=False)
